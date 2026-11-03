@@ -919,6 +919,40 @@ on secure-field bounds from that capture, so without them the engine cannot
 prove a fallback screenshot safe.
 </Note>
 
+## Covered controls
+
+A node whose tap point sits under something else on the screen reads as
+hidden, as a node scrolled past the screen's edge does. A tap lands on the
+centre of a node's box. Two things cover it:
+
+- Chrome over a scroll view: a node outside the scroll view, listed after it
+  in the tree or a navigation, tab, or tool bar, that spans less than half
+  the scroll view. A sticky footer, header, or tab bar is chrome. It covers
+  its box plus 8 points. Chrome within a quarter of the scroll view's height
+  of its top or bottom edge also covers the space up to that edge, where its
+  padding is drawn.
+- The soft keyboard, over every node of the app except its own keys and the
+  bars it hosts.
+
+```ts
+const accept = screen.getByTestId('accept-terms');
+await screen.scrollUntilVisible(accept); // scrolls until the footer no longer covers it
+await accept.tap();
+```
+
+- `toBeVisible`, `isVisible`, a `{ visible: true }` query, and
+  `getByRole` treat a covered node as hidden. `scrollUntilVisible` keeps
+  scrolling while its target is covered.
+- `tap`, `doubleTap`, `longPress`, `focus`, `fill`, `clear`, `check`,
+  `uncheck`, and a `press` on an unfocused field wait for the tap point to
+  clear. When it is still covered as the action's timeout runs out, it fails
+  with `ACTION_FAILED`, names what covers the node, and sends nothing.
+- The tree has only what a platform lists. A view with no accessibility
+  element and nothing listed in it, such as a decorative banner, covers
+  nothing.
+- Content is never covered by other content of the same scroll view, and a
+  node outside any scroll view only by the keyboard.
+
 ## Video recording cleanup
 
 A provider recording that fails to stop stays owned by its worker. The

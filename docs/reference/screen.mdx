@@ -485,6 +485,9 @@ await screen.getByTestId('feed').scrollUntilVisible(row);
   whole scroll, each swipe included.
 - On a locator each step swipes that node. So a feed or a table that is its
   own scroll container pages without the pointer hovering it first.
+- On a device, a target under sticky chrome or the soft keyboard is not
+  visible yet, so the scroll goes on until it clears
+  ([Covered controls](/reference/mobile#covered-controls)).
 
 | Throws | When |
 | --- | --- |

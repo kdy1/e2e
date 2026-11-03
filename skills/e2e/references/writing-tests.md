@@ -200,7 +200,9 @@ substring; a `RegExp` matches as written.
   text inside or filter with `has`.
 - `screen.scrollUntilVisible(locator, { direction?, momentum?, timeout? })`
   scrolls the viewport (`down`, `slow` by default) until the locator resolves
-  visibly, else `LOCATOR_NOT_FOUND`; on a locator it scrolls that node.
+  visibly, else `LOCATOR_NOT_FOUND`; on a locator it scrolls that node. On a
+  device a node under sticky chrome or the soft keyboard reads as hidden, so
+  the scroll goes on until it clears, and a tap waits for it to clear.
 
 ### Actions
 
