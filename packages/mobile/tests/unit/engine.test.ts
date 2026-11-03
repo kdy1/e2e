@@ -3219,3 +3219,76 @@ describe('deterministic actions', () => {
   });
 });
 
+
+describe('a press on a covered node', () => {
+  /** The Sticky Chrome Target with "Accept terms" at `acceptY`, under the footer's Continue decoy at y 782. */
+  function sticky(acceptY: number): RawNode[] {
+    return [
+      { ref: '@e1', index: 0, depth: 0, type: 'Application', label: 'e2e Benchmark', rect: { x: 0, y: 0, width: 402, height: 874 } },
+      { ref: '@e2', index: 1, parentIndex: 0, depth: 1, type: 'ScrollView', rect: { x: 0, y: 116, width: 402, height: 758 } },
+      { ref: '@e3', index: 2, parentIndex: 1, depth: 2, type: 'Other', label: 'Accept terms', identifier: 'accept-terms', rect: { x: 16, y: acceptY, width: 370, height: 46 } },
+      { ref: '@e4', index: 3, parentIndex: 1, depth: 2, type: 'TextField', label: 'Notes', identifier: 'notes', rect: { x: 16, y: acceptY - 60, width: 370, height: 44 } },
+      { ref: '@e5', index: 4, parentIndex: 0, depth: 1, type: 'Other', label: 'Continue', identifier: 'continue-button', rect: { x: 16, y: 800, width: 370, height: 46 } },
+    ];
+  }
+
+  /** Answers each capture with the next screen in `screens`, the last one from then on. */
+  function screens(h: Harness, ...shots: Array<Record<string, unknown>>): void {
+    let shot = 0;
+    h.fake.respond('capture.snapshot', () => {
+      const answer = shots[Math.min(shot, shots.length - 1)];
+      shot += 1;
+      return { nodes: [], appName: 'e2e Benchmark', appBundleId: 'dev.e2e.benchmark', truncated: false, viewport: { width: 402, height: 874 }, ...answer };
+    });
+  }
+
+  const step = (timeoutMs = 30_000): OperationContext => ({ ...operation(), timeoutMs, origin: 'test' });
+
+  it('waits for the tap point to clear and presses the node where it came to rest', async () => {
+    autoAdvanceTimers();
+    const h = harness({ transition: 0 });
+    await openAttempt(h);
+    screens(h, { nodes: sticky(782) }, { nodes: sticky(782) }, { nodes: sticky(690) });
+    const [accept] = await h.engine.locate!(testIdQuery('accept-terms'), step());
+    expect(accept?.states?.hidden).toBe(true);
+    const before = h.fake.calls.filter((call) => call.method === 'capture.snapshot').length;
+    await h.engine.perform!(accept!.ref, { kind: 'tap' }, step());
+    expect(h.fake.calls.filter((call) => call.method === 'capture.snapshot').length - before).toBe(2);
+    expect(h.fake.calls.filter((call) => call.method === 'interactions.press').map((call) => call.args)).toEqual([{ ref: '@e3' }]);
+  });
+
+  it('refuses a node still covered when the budget runs out, naming the cover, and sends nothing', async () => {
+    autoAdvanceTimers();
+    const h = harness({ transition: 0 });
+    await openAttempt(h);
+    screens(h, { nodes: sticky(782) });
+    const [accept] = await h.engine.locate!(testIdQuery('accept-terms'), step());
+    await expect(h.engine.perform!(accept!.ref, { kind: 'tap' }, step(1_000))).rejects.toMatchObject({
+      code: 'NOT_ACTIONABLE',
+      retryable: false,
+      message: expect.stringMatching(/covered at its tap point by other "Continue"/),
+    });
+    expect(h.fake.calls.some((call) => call.method === 'interactions.press')).toBe(false);
+  });
+
+  it('refuses to fill a field under the keyboard, and types a key into a focused one it covers', async () => {
+    autoAdvanceTimers();
+    const h = harness({ transition: 0 });
+    await openAttempt(h);
+    const keyboard = { kind: 'visible', frame: { x: 0, y: 548, width: 402, height: 326 } };
+    const nodes = sticky(782).map((node) => (node.identifier === 'notes' ? { ...node, rect: { x: 16, y: 600, width: 370, height: 44 } } : node));
+    screens(h, { nodes, keyboard });
+    const [notes] = await h.engine.locate!(testIdQuery('notes'), step());
+    await expect(h.engine.perform!(notes!.ref, { kind: 'fill', value: 'blue', sensitive: false }, step(1_000))).rejects.toMatchObject({
+      code: 'NOT_ACTIONABLE',
+      message: expect.stringMatching(/covered at its tap point by the keyboard/),
+    });
+    expect(h.fake.calls.some((call) => call.method === 'interactions.fill')).toBe(false);
+
+    screens(h, { nodes: nodes.map((node) => (node.identifier === 'notes' ? { ...node, focused: true } : node)), keyboard });
+    const [focused] = await h.engine.locate!(testIdQuery('notes'), step());
+    await h.engine.perform!(focused!.ref, { kind: 'press', key: 'a' }, step(1_000));
+    expect(h.fake.lastArgs('interactions.type')).toEqual({ text: 'a' });
+    expect(h.fake.calls.some((call) => call.method === 'interactions.press')).toBe(false);
+  });
+});
