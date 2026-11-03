@@ -99,14 +99,16 @@ export interface MobileOptions {
    */
   readonly settle?: number | false | undefined;
   /**
-   * How long a control that appeared or moved with the last action is given
+   * The most a control that appeared or moved with the last action is given
    * to finish arriving before a test acts on it, in milliseconds. Default
-   * 500, the length of a modal or screen transition. Accessibility frames
-   * report a control's final position from the first frame of a transition,
-   * so this budget is the only thing that keeps a test from tapping a point
-   * the control has not reached. Unmoved controls are acted on immediately
-   * only when keyboard visibility is unchanged. Opening or closing the
-   * keyboard also uses the remaining budget. Raise it for slower transitions.
+   * 500, the length of a modal or screen transition. The test acts sooner
+   * once the screen's layout has stayed the same for half a second since it
+   * last changed: iOS reports a pushed screen, a modal, or the keyboard at
+   * its final position from the first frame of the animation, and half a
+   * second covers the slide that follows. Motion the frames show, such as a
+   * scroll's momentum, is followed until it stops. Unmoved controls are
+   * acted on immediately only when keyboard visibility is unchanged. Raise
+   * it for screens that keep moving longer.
    */
   readonly transition?: number | undefined;
   /**

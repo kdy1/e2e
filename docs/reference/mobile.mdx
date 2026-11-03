@@ -218,14 +218,15 @@ mobile({ platform: 'ios', settle: 300 }); // default: 150
 
 ```ts
 /**
- * Wait before acting on a control that just appeared or moved, in
- * milliseconds. Default 500. Accessibility bounds cannot tell a sliding
- * control from a landed one (iOS reports the final frame at once, Android
- * the frame in flight), so the control is found again in a fresh snapshot
- * once the wait is over and acted on where it landed. Unmoved controls are
- * acted on immediately only when keyboard visibility is unchanged. Opening
- * or closing the keyboard also uses the remaining budget. Raise it for
- * slower transitions.
+ * The longest wait before acting on a control that just appeared or moved,
+ * in milliseconds. Default 500. The wait ends sooner once the screen's
+ * layout has stayed the same for half a second since it last changed, and
+ * the control is acted on where the newest snapshot shows it. iOS reports
+ * a pushed screen, a modal, or the keyboard at its final frame at once, so
+ * the half second covers the slide; motion the bounds show, such as a
+ * scroll's momentum or Android's frames in flight, is followed until it
+ * stops. Unmoved controls are acted on immediately only when keyboard
+ * visibility is unchanged. Raise it for screens that keep moving longer.
  */
 readonly transition?: number | undefined;
 ```
@@ -239,7 +240,8 @@ If the control changes during the wait, the action finds it again within its tim
 `back`, `home`, `alert`, `dismissKeyboard`, `setOrientation`, and `fold` on
 [`device`](#device) change the screen, so they count as actions for this
 budget the way a tap does. A control that arrives with the screen they reveal
-waits out the budget before the next action lands on it.
+waits for that screen to hold still, at most the budget, before the next
+action lands on it.
 
 `fill` and `clear` re-read the field before typing. Missing fields, changed
 security state, or incomplete captures return `NODE_STALE` before mutation,

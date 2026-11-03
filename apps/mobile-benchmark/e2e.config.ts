@@ -34,21 +34,22 @@ export const ios = mobile({
   platform: 'ios',
   device: iosDevices === undefined || iosDevices.length !== 1 ? iosDevices : iosDevices[0],
   session: 'e2e-mobile-benchmark-ios',
-  // A control that just moved waits this long to come to rest before a tap;
-  // an unmoved one is tapped at once, so the budget costs only after a
-  // scroll. iOS reports a row's final frame from the first frame of a fling,
-  // and the default half second let a tap after scrollUntilVisible land on
-  // the row still passing underneath on a loaded simulator.
+  // The most a control that just moved waits to come to rest before a tap;
+  // an unmoved one is tapped at once, and a moved one once the screen has
+  // held still for half a second. A row's frame moves in every snapshot
+  // while a fling decelerates, so the wait follows it; the default half
+  // second let a tap after scrollUntilVisible land on the row still passing
+  // underneath on a loaded simulator.
   transition: 1_500,
 });
 
 export const android = mobile({
   platform: 'android',
   session: 'e2e-mobile-benchmark-android',
-  // A control that arrived with the last action is found again once this
-  // budget has passed, so the budget only has to outlast the transition: the
-  // Modal Flow's modal slides in from below for about 700 ms on the emulator,
-  // longer on a loaded CI one, and the default half second ended inside it.
+  // The most a control that arrived with the last action waits for the
+  // screen to hold still: the Modal Flow's modal slides in from below for
+  // about 700 ms on the emulator, longer on a loaded CI one, and the default
+  // half second ended inside it.
   transition: 1_500,
 });
 

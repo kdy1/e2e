@@ -386,9 +386,9 @@ export default {
   `appiumVersion` (such as `'3.2.0'`): BrowserStack's default Appium 1.x
   lacks `mobile:` commands. An attempt that records video links
   BrowserStack's recording of the whole session.
-- A control that appeared or moved with the previous action waits out
-  `transition` (default 500 ms). Opening or closing the keyboard also uses
-  the remaining budget. Agent actions settle `settle` ms (default
+- A control that appeared or moved with the previous action, or after the
+  keyboard opened or closed, waits until the screen has held still for
+  half a second, at most `transition` (default 500 ms). Agent actions settle `settle` ms (default
   150) before the next observation, `settle: false` skips it.
 - Mobile `fill` and `clear` re-read the field before typing, replay included.
   Missing fields, changed security state, or incomplete captures return

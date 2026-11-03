@@ -3196,6 +3196,119 @@ describe('deterministic actions', () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
   });
 
+  /** The Settings screen with a Submit button at `y` under `ref`, standing for a control that came with the last action. */
+  const withSubmit = (y: number, ref = '@e11') => ({
+    ...SETTINGS_SNAPSHOT,
+    nodes: [
+      ...SETTINGS_NODES,
+      { ref, index: 10, parentIndex: 0, depth: 1, type: 'button', label: 'Submit', rect: { x: 0, y, width: 390, height: 44 } },
+    ],
+  });
+
+  it('acts on a control that came with the last action once the screen has held still, before the budget runs out', async () => {
+    const h = harness({ transition: 1_500 });
+    await openAttempt(h);
+    await h.engine.perform!((await observed(h, 'Back')).ref, { kind: 'tap' }, test());
+    h.fake.respond('capture.snapshot', () => withSubmit(600));
+    const startedAt = Date.now();
+    const submit = await observed(h, 'Submit');
+    const looks = h.fake.methods().filter((method) => method === 'capture.snapshot').length;
+    await h.engine.perform!(submit.ref, { kind: 'tap' }, test());
+    // iOS draws a slide after reporting its end frames, so the screen gets
+    // half a second from its last change, and one look confirms it held still.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(500);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(h.fake.methods().filter((method) => method === 'capture.snapshot')).toHaveLength(looks + 1);
+    expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: '@e11' });
+  });
+
+  it('follows a control that keeps moving until it holds still, and acts where it stopped', async () => {
+    const h = harness({ transition: 5_000 });
+    await openAttempt(h);
+    await h.engine.perform!((await observed(h, 'Back')).ref, { kind: 'tap' }, test());
+    // A row still decelerating after a fling: each look finds it higher up, until it stops.
+    const ys = [700, 560, 470, 430, 430];
+    let look = 0;
+    h.fake.respond('capture.snapshot', () => {
+      const y = ys[Math.min(look, ys.length - 1)]!;
+      look += 1;
+      return withSubmit(y, `@e${20 + Math.min(look, ys.length - 1)}`);
+    });
+    const startedAt = Date.now();
+    const moving = await observed(h, 'Submit');
+    await h.engine.perform!(moving.ref, { kind: 'tap' }, test());
+    expect(look).toBe(ys.length);
+    // The last move was seen on the fourth look, half a second apart each.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(2_000);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: '@e24' });
+  });
+
+  it('acts on the newest capture once the budget has passed, even on a screen that never holds still', async () => {
+    const h = harness({ transition: 1_200 });
+    await openAttempt(h);
+    await h.engine.perform!((await observed(h, 'Back')).ref, { kind: 'tap' }, test());
+    let look = 0;
+    h.fake.respond('capture.snapshot', () => {
+      look += 1;
+      return withSubmit(600 - look, `@e${20 + look}`);
+    });
+    const startedAt = Date.now();
+    await h.engine.perform!((await observed(h, 'Submit')).ref, { kind: 'tap' }, test());
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_200);
+    expect(Date.now() - startedAt).toBeLessThan(1_700);
+    expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: `@e${20 + look}` });
+  });
+
+  it('after a launch, acts once the launched screen has held still rather than after the whole budget', async () => {
+    const h = harness({ transition: 1_500 });
+    await openAttempt(h);
+    await sleep(2_000);
+    const launchedAt = Date.now();
+    await h.engine.session!.restart!(test());
+    await h.engine.perform!((await observed(h, 'About')).ref, { kind: 'tap' }, test());
+    expect(Date.now() - launchedAt).toBeGreaterThanOrEqual(500);
+    expect(Date.now() - launchedAt).toBeLessThan(1_500);
+  });
+
+  it('starts the quiet window again when the app relays out after the keyboard opens', async () => {
+    const h = harness({ transition: 3_000 });
+    await openAttempt(h);
+    await sleep(3_000);
+    const search = await observed(h, 'Search');
+    await h.engine.perform!(search.ref, { kind: 'focus' }, test());
+    const focusedAt = Date.now();
+    const keyboard = { ...SETTINGS_SNAPSHOT, keyboard: { kind: 'visible' as const, frame: { x: 0, y: 580, width: 390, height: 264 } } };
+    h.fake.respond('capture.snapshot', () => keyboard);
+    const stale = await observed(h, 'About');
+    // The first look of the wait finds the relayout that followed the keyboard.
+    let look = 0;
+    h.fake.respond('capture.snapshot', () => {
+      look += 1;
+      return {
+        ...keyboard,
+        nodes: SETTINGS_NODES.map((node) => node.identifier === 'ABOUT' || node.label === 'About'
+          ? { ...node, ref: '@e42', rect: { x: 0, y: 60, width: 390, height: 44 } } : node),
+      };
+    });
+    await h.engine.perform!(stale.ref, { kind: 'tap' }, test());
+    expect(look).toBe(2);
+    expect(Date.now() - focusedAt).toBeGreaterThanOrEqual(1_000);
+    expect(Date.now() - focusedAt).toBeLessThan(3_000);
+    expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: '@e42' });
+  });
+
+  it('keeps an action under a budget shorter than the quiet window to that budget', async () => {
+    const h = harness({ transition: 200 });
+    await openAttempt(h);
+    await h.engine.perform!((await observed(h, 'Back')).ref, { kind: 'tap' }, test());
+    h.fake.respond('capture.snapshot', () => withSubmit(600));
+    const startedAt = Date.now();
+    await h.engine.perform!((await observed(h, 'Submit')).ref, { kind: 'tap' }, test());
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
   it('does not count a toggle already in the wanted state as an action', async () => {
     const h = harness({ transition: 120 });
     await openAttempt(h);

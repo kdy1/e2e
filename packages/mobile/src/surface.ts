@@ -210,17 +210,46 @@ interface NodeBinding {
 
 
 /**
- * How long a control that appeared or moved with the last action is given to
- * finish arriving before a test acts on it. The tree cannot tell a sliding
- * control from a landed one: iOS reports the final frame the moment a
- * transition starts, Android the frame in flight, so a modal or pushed screen
- * keeps sliding for about half a second after the action that opened it and
- * a tap aimed from either frame lands on whatever is behind the control.
- * Once the budget has passed the control is found again in a fresh
- * snapshot. Unmoved controls are immediate only when keyboard state also
- * stayed the same; a visible keyboard can precede the app's relayout.
+ * The most a control that appeared or moved with the last action is given to
+ * finish arriving before a test acts on it; it is acted on sooner once the
+ * screen holds still (SCREEN_QUIET_MS). A tap aimed at a control still
+ * sliding in lands on whatever is behind it. Unmoved controls are immediate
+ * only when keyboard state also stayed the same; a visible keyboard can
+ * precede the app's relayout.
  */
 const DEFAULT_TRANSITION_MS = 500;
+
+/**
+ * How long the screen's layout must stay the same, since it was last seen to
+ * change, before a control that arrived or moved counts as at rest. iOS puts
+ * a pushed screen, a modal, the keyboard, or a launch at its final frames the
+ * moment the animation starts and draws the slide after, so a still tree
+ * says nothing until the animation is over; on a simulator those animations
+ * took 250 to 500 ms from their first frame. A scroll's momentum and Android's
+ * frames in flight move the frames in every capture, so the wait follows
+ * them until they stop.
+ */
+const SCREEN_QUIET_MS = 500;
+
+/**
+ * The geometry of a capture: every node's kind, test id, and frame, and
+ * whether the keyboard shows. Text and values are left out, so a label that
+ * ticks is not motion.
+ */
+function layoutOf(screen: ProjectedScreen): string {
+  const nodes = screen.index.map(({ kind, node }) => {
+    const rect = node.rect;
+    const frame = rect === undefined ? '' : [rect.x, rect.y, rect.width, rect.height].map(Math.round).join(',');
+    return `${kind}|${node.testId ?? ''}|${frame}`;
+  });
+  return `${screen.keyboardVisible}\n${nodes.join('\n')}`;
+}
+
+/** One capture with its projection, as an action reads its target from it. */
+interface Capture {
+  readonly raw: RawSnapshot;
+  readonly projected: ProjectedScreen;
+}
 
 /** How one screenshot is taken. */
 interface ScreenshotCapture {
@@ -436,6 +465,10 @@ export class AgentDeviceSurface {
   private screenBeforeAction: ProjectedScreen | undefined;
   /** The most recent projection of the screen, from any observe or locate. */
   private latestScreen: ProjectedScreen | undefined;
+  /** The layout of the most recent capture; see `layoutOf`. */
+  private latestLayout: string | undefined;
+  /** When a capture last showed the layout change, or the last action if none has since. */
+  private screenChangedAt = 0;
   /** Budget a control that came with the last action gets to finish arriving; see DEFAULT_TRANSITION_MS. */
   private readonly transitionMs: number;
   /**
@@ -503,8 +536,8 @@ export class AgentDeviceSurface {
   /**
    * Runs a fixture command that changes the screen (a back, the home screen,
    * a dismissed alert or keyboard, a rotation) and records it as an action,
-   * so a control that arrives with the change waits out the transition
-   * budget before a test acts on it, as it does after a tap. Without this a
+   * so a control that arrives with the change waits for the screen to hold
+   * still before a test acts on it, as it does after a tap. Without this a
    * `device.back()` followed by a tap lands where the returning screen has
    * not yet arrived.
    */
@@ -1031,6 +1064,11 @@ export class AgentDeviceSurface {
       keyboardVisible: keyboardShowing(raw),
     };
     this.latestScreen = projected;
+    const layout = layoutOf(projected);
+    if (layout !== this.latestLayout) {
+      this.latestLayout = layout;
+      this.screenChangedAt = Date.now();
+    }
     const read = projected.viewport;
     if (read !== undefined && (this.knownViewport === undefined || sameScreen(read, this.knownViewport))) this.knownViewport = read;
     return projected;
@@ -1230,39 +1268,53 @@ export class AgentDeviceSurface {
   }
 
   /**
-   * Waits for a control that arrived or moved with the last action, returning
-   * whether it waited. Controls already present at the same place need no wait,
-   * unless keyboard state changed: a keyboard change can precede the app's relayout.
+   * Waits for a control that arrived or moved with the last action to come to
+   * rest, returning the capture that shows it at rest, or undefined when no
+   * wait was needed. Controls already present at the same place need no wait,
+   * unless keyboard state changed: a keyboard change can precede the app's
+   * relayout. Any other control is at rest once a capture taken
+   * SCREEN_QUIET_MS after the screen last changed shows it unchanged, and at
+   * the latest once the transition budget has passed since the action.
    */
-  private async waitForTransition(entry: NodeBinding, operation: OperationContext): Promise<boolean> {
-    const since = Date.now() - this.lastActionAt;
-    const remaining = this.transitionMs - since;
-    if (remaining <= 0) return false;
+  private async waitForTransition(entry: NodeBinding, operation: OperationContext, budget: InputBudget): Promise<Capture | undefined> {
+    const deadline = this.lastActionAt + this.transitionMs;
+    if (Date.now() >= deadline) return undefined;
     const before = this.screenBeforeAction;
-    if (before !== undefined && before.keyboardVisible === entry.keyboardVisible && this.samePlace(entry, before.index) !== undefined) return false;
-    await sleep(remaining, operation.signal);
-    // The sleep resolves on abort; the action behind it must not go out once
-    // the caller has already been told the operation was cancelled.
-    if (operation.signal.aborted) {
-      throw new EngineError('CANCELLED', 'transition wait cancelled', { retryable: false });
+    if (before !== undefined && before.keyboardVisible === entry.keyboardVisible && this.samePlace(entry, before.index) !== undefined) return undefined;
+    for (;;) {
+      const changedAt = this.screenChangedAt;
+      const restAt = Math.min(changedAt + SCREEN_QUIET_MS, deadline);
+      if (restAt > Date.now()) await sleep(restAt - Date.now(), operation.signal);
+      // The sleep resolves on abort; the action behind it must not go out once
+      // the caller has already been told the operation was cancelled.
+      if (operation.signal.aborted) {
+        throw new EngineError('CANCELLED', 'transition wait cancelled', { retryable: false });
+      }
+      const startedAt = Date.now();
+      const raw = await this.snapshotOrEmpty(operation, false, budget);
+      const projected = this.project(raw);
+      if (this.screenChangedAt === changedAt || startedAt >= deadline) return { raw, projected };
     }
-    return true;
   }
 
   /** Refreshes a control after a transition wait, keeping the binding when no wait was needed. */
   private async settled(entry: NodeBinding, operation: OperationContext, budget: InputBudget): Promise<NodeBinding> {
-    if (await this.waitForTransition(entry, operation)) return this.relocated(entry, operation, budget);
-    return entry;
+    const rest = await this.waitForTransition(entry, operation, budget);
+    return rest === undefined ? entry : this.foundIn(entry, rest);
+  }
+
+  /** The same control in a fresh snapshot; see `foundIn`. */
+  private async relocated(entry: NodeBinding, operation: OperationContext, budget: InputBudget, input = false): Promise<NodeBinding> {
+    const raw = await this.snapshotOrEmpty(operation, false, budget);
+    return this.foundIn(entry, { raw, projected: this.project(raw) }, input);
   }
 
   /**
-   * The same control in a fresh snapshot. A snapshot that no longer lists it
+   * The same control in a newer capture. A capture that no longer lists it
    * is a retryable NODE_STALE, so the locator resolves again; input mutations
-   * also refuse a truncated snapshot or changed security facts.
+   * also refuse a truncated capture or changed security facts.
    */
-  private async relocated(entry: NodeBinding, operation: OperationContext, budget: InputBudget, input = false): Promise<NodeBinding> {
-    const raw = await this.snapshotOrEmpty(operation, false, budget);
-    const projected = this.project(raw);
+  private foundIn(entry: NodeBinding, { raw, projected }: Capture, input = false): NodeBinding {
     const found = this.refind(entry, projected.index);
     if (input && (isTruncated(raw) || found === undefined ||
       entry.node.inputPurpose !== found.node.inputPurpose ||
@@ -1279,12 +1331,14 @@ export class AgentDeviceSurface {
 
   /**
    * Records an action the device received: the screen as it was projected
-   * before it, and when it returned. The transition budget counts from the
-   * return, since the input lands late in the command's own round trip.
+   * before it, and when it returned. The transition budget and the quiet
+   * window count from the return, since the input lands late in the
+   * command's own round trip.
    */
   private markAction(before: ProjectedScreen | undefined): void {
     this.screenBeforeAction = before;
     this.lastActionAt = Date.now();
+    this.screenChangedAt = this.lastActionAt;
   }
 
   async perform(ref: NodeRef, action: LocatorAction, operation: OperationContext, input: InputBudget): Promise<void> {
@@ -1325,8 +1379,8 @@ export class AgentDeviceSurface {
     const run = async (): Promise<unknown> => {
       let target = entry;
       if (filling) {
-        if (deterministic) await this.waitForTransition(entry, operation);
-        target = await this.relocated(entry, operation, input, true);
+        const rest = deterministic ? await this.waitForTransition(entry, operation, input) : undefined;
+        target = rest === undefined ? await this.relocated(entry, operation, input, true) : this.foundIn(entry, rest, true);
         if (!target.takesText) throw refuseFill(target);
       } else if (deterministic) {
         target = await this.settled(entry, operation, input);
