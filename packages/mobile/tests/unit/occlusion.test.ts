@@ -25,7 +25,7 @@ function project(nodes: readonly RawNode[], keyboard?: Rect) {
 function covers(nodes: readonly RawNode[], keyboard?: Rect): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
   for (const entry of project(nodes, keyboard).index) {
-    out[entry.raw.identifier ?? entry.raw.label ?? entry.kind] = entry.coveredBy;
+    out[entry.raw.identifier ?? entry.raw.label ?? entry.kind] = entry.coveredBy?.by;
   }
   return out;
 }
@@ -76,8 +76,24 @@ describe('sticky chrome over a scroll view', () => {
 
   it('leaves a covered node visible: the cover is for a press to wait on, not for visibility', () => {
     const accept = project(stickyChrome(836)).index.find((entry) => entry.raw.identifier === 'accept-terms');
-    expect(accept?.coveredBy).toBe('other "Continue"');
+    expect(accept?.coveredBy?.by).toBe('other "Continue"');
     expect(accept?.node.states?.hidden).toBeUndefined();
+  });
+
+  it('gives a scroll the whole footer to clear, every chrome node over the tap point together, and the scroll view it is over', () => {
+    const accept = project(stickyChrome(782)).index.find((entry) => entry.raw.identifier === 'accept-terms');
+    // Continue's region starts at 792 and the footer text's at 768.33; both reach the screen's bottom.
+    expect(accept?.coveredBy?.chrome).toEqual({
+      region: { x: 8, y: 768.33, width: 386, height: 874 - 768.33 },
+      scroll: { x: 0, y: 116, width: 402, height: 758 },
+    });
+  });
+
+  it('gives the keyboard no scroll view: no scroll moves a node out from under it', () => {
+    expect(project([
+      { index: 0, ref: '@e1', type: 'Application', rect: { x: 0, y: 0, width: 402, height: 874 } },
+      { index: 1, ref: '@e2', parentIndex: 0, type: 'TextField', identifier: 'field', rect: { x: 16, y: 600, width: 370, height: 44 } },
+    ], { x: 0, y: 548, width: 402, height: 326 }).index[1]?.coveredBy).toEqual({ by: 'the keyboard' });
   });
 
   it('finds it clear once it is scrolled out, as the passing runs leave it at y 688 and 730', () => {

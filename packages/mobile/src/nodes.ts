@@ -9,7 +9,7 @@
 
 import type { SnapshotNode } from 'agent-device';
 import type { SemanticNode, ViewportSize } from 'e2e/engine';
-import { coveredNodes } from './occlusion.ts';
+import { coveredNodes, type Cover } from './occlusion.ts';
 import type { Rect } from './support.ts';
 
 /**
@@ -35,7 +35,7 @@ export interface ProjectedNode {
    * is. It leaves the node's visibility alone: a press waits for it to
    * clear, see `coveredNodes` in occlusion.ts.
    */
-  readonly coveredBy: string | undefined;
+  readonly coveredBy: Cover | undefined;
 }
 
 export interface ProjectedSnapshot {

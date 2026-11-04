@@ -61,6 +61,7 @@ import {
   type ProjectedSnapshot,
 } from './nodes.ts';
 import { keyboardDragStart } from './keyboard.ts';
+import type { Cover } from './occlusion.ts';
 import { DEVICE_PERMISSIONS, type AgentDeviceClient, type ClientFactory, type DevicePermission, type LaunchPermissions, type MobileOptions, type PermissionState } from './options.ts';
 import { maskPng } from './png.ts';
 import { mobileDoctor } from './doctor.ts';
@@ -210,7 +211,7 @@ interface NodeBinding {
   /** Whether `fill` and `clear` may type into the node, judged with the children `node` leaves out. */
   readonly takesText: boolean;
   /** What is drawn over the node's tap point in the capture it came from; undefined when nothing is. */
-  readonly coveredBy: string | undefined;
+  readonly coveredBy: Cover | undefined;
 }
 
 /** The actions that press the node they act on, so a press on a covered one would land on its cover. */
@@ -218,6 +219,26 @@ const PRESSING_ACTIONS: ReadonlySet<LocatorAction['kind']> = new Set(['tap', 'fo
 
 /** How long a press on a covered node waits between captures for its tap point to clear. */
 const COVER_POLL_MS = 100;
+
+/** How many drags a press makes to bring a node out from under its scroll view's sticky chrome before it waits only. */
+const COVER_SCROLLS = 3;
+
+/**
+ * How far past the chrome's region, in points, the drag leaves the node's
+ * tap point. Chrome draws padding above what the tree lists: the mobile
+ * benchmark's footer took a tap 9 pt above its text's listed frame.
+ */
+const COVER_SCROLL_MARGIN = 32;
+
+/**
+ * How far the finger moves before the scroll view takes the drag, in points;
+ * a drag is that much longer than the distance the content must move. A
+ * 118 pt drag on an iOS simulator scrolled 106 pt.
+ */
+const DRAG_SLOP = 12;
+
+/** How long the drag lasts per point it moves: slow enough that the content follows the finger and stops with it instead of flinging on. */
+const COVER_DRAG_MS_PER_POINT = 8;
 
 
 /**
@@ -244,6 +265,9 @@ function sameScreen(a: ViewportSize, b: ViewportSize): boolean {
   const near = (x: number, y: number): boolean => Math.abs(x - y) < 1;
   return (near(a.width, b.width) && near(a.height, b.height)) || (near(a.width, b.height) && near(a.height, b.width));
 }
+
+/** How far inside the scroll view's edge, in points, a drag that scrolls a node clear of its chrome lifts the finger at the most. */
+const CHROME_GRIP = 8;
 
 /** The centre of a rect in logical pixels. */
 function centreOf(rect: Rect): { x: number; y: number } {
@@ -1298,27 +1322,71 @@ export class AgentDeviceSurface {
   /**
    * The control once nothing is drawn over its tap point, the way Playwright
    * waits for a node to receive events: a press on a covered node lands on
-   * whatever covers it (a sticky footer, the keyboard), so it waits, finding
-   * the node again in a fresh capture every `COVER_POLL_MS`, while the budget
-   * still fits another capture and the press. One still covered then is
+   * whatever covers it (a sticky footer, the keyboard), so it finds the node
+   * again in a fresh capture every `COVER_POLL_MS`. A node at rest under
+   * sticky chrome over its own scroll view stays there, since a scroll that
+   * stopped will not move again, so it is dragged clear (`scrollClear`), as
+   * Playwright scrolls a node into view before a click, and the press waits
+   * for it to come to rest. The keyboard is waited on only. One still covered
+   * when the budget no longer fits another capture and the press is
    * NOT_ACTIONABLE, naming the cover, and nothing is sent.
    */
   private async uncovered(entry: NodeBinding, operation: OperationContext, budget: InputBudget, input: boolean): Promise<NodeBinding> {
     let target = entry;
     let captureMs = 0;
-    while (target.coveredBy !== undefined) {
+    let scrolls = 0;
+    let atRest = false;
+    while (target.coveredBy !== undefined || (scrolls > 0 && !atRest)) {
+      const cover = target.coveredBy;
       if (budget.remainingMs() <= COVER_POLL_MS + captureMs) {
-        throw notActionable(`node ${target.id} is covered at its tap point by ${target.coveredBy}; scroll it clear or dismiss what covers it`);
+        if (cover === undefined) break;
+        throw notActionable(`node ${target.id} is covered at its tap point by ${cover.by}; scroll it clear or dismiss what covers it`);
       }
-      await sleep(COVER_POLL_MS, operation.signal);
+      if (cover?.chrome !== undefined && atRest && scrolls < COVER_SCROLLS) {
+        scrolls += 1;
+        await this.scrollClear(target, cover.chrome, budget);
+      } else {
+        await sleep(COVER_POLL_MS, operation.signal);
+      }
       if (operation.signal.aborted) {
         throw new EngineError('CANCELLED', 'covered node wait cancelled', { retryable: false });
       }
       const startedMs = Date.now();
-      target = await this.relocated(target, operation, budget, input);
+      const next = await this.relocated(target, operation, budget, input);
       captureMs = Date.now() - startedMs;
+      atRest = sameRect(next.node.rect, target.node.rect);
+      target = next;
     }
     return target;
+  }
+
+  /**
+   * Drags the scroll view a node sits in by the least that moves its tap
+   * point `COVER_SCROLL_MARGIN` past the region of the sticky chrome over it,
+   * plus the `DRAG_SLOP` the scroll view takes before it follows:
+   * up for chrome along the scroll view's bottom, down for chrome along its
+   * top. The finger goes down halfway between the chrome and the scroll
+   * view's far edge: chrome draws past what the tree lists (a footer's
+   * padding and background), and a drag that starts on it scrolls nothing.
+   * It moves at `COVER_DRAG_MS_PER_POINT`, so the content stops where the
+   * finger lifts. A drag the scroll view has no room for goes as far as it
+   * can; the next capture tells whether the node came clear.
+   */
+  private async scrollClear(target: NodeBinding, chrome: NonNullable<Cover['chrome']>, budget: InputBudget): Promise<void> {
+    const rect = target.node.rect;
+    if (rect === undefined) return;
+    const point = centreOf(rect);
+    const { region, scroll } = chrome;
+    const x = scroll.x + scroll.width / 2;
+    const below = region.y + region.height / 2 > scroll.y + scroll.height / 2;
+    const y = below ? (scroll.y + region.y) / 2 : (region.y + region.height + scroll.y + scroll.height) / 2;
+    const wanted = below ? region.y - COVER_SCROLL_MARGIN - point.y : region.y + region.height + COVER_SCROLL_MARGIN - point.y;
+    const dy = below ? Math.max(wanted - DRAG_SLOP, scroll.y + CHROME_GRIP - y) : Math.min(wanted + DRAG_SLOP, scroll.y + scroll.height - CHROME_GRIP - y);
+    const durationMs = Math.round(Math.abs(dy) * COVER_DRAG_MS_PER_POINT);
+    const client = this.requireClient();
+    const before = this.latestScreen;
+    await budget.send(() => client.interactions.pan({ x, y, dx: 0, dy, durationMs }), durationMs);
+    this.markAction(before);
   }
 
   /**

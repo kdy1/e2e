@@ -3244,30 +3244,49 @@ describe('a press on a covered node', () => {
 
   const step = (timeoutMs = 30_000): OperationContext => ({ ...operation(), timeoutMs, origin: 'test' });
 
-  it('waits for the tap point to clear and presses the node where it came to rest', async () => {
+  it('waits while a scroll carries the node out from under the footer, and presses it without dragging', async () => {
     autoAdvanceTimers();
     const h = harness({ transition: 0 });
     await openAttempt(h);
-    screens(h, { nodes: sticky(782) }, { nodes: sticky(782) }, { nodes: sticky(690) });
+    screens(h, { nodes: sticky(782) }, { nodes: sticky(770) }, { nodes: sticky(690) });
     const [accept] = await h.engine.locate!(testIdQuery('accept-terms'), step());
     expect(accept?.states?.hidden).toBeUndefined();
     const before = h.fake.calls.filter((call) => call.method === 'capture.snapshot').length;
     await h.engine.perform!(accept!.ref, { kind: 'tap' }, step());
     expect(h.fake.calls.filter((call) => call.method === 'capture.snapshot').length - before).toBe(2);
+    expect(h.fake.calls.some((call) => call.method === 'interactions.pan')).toBe(false);
     expect(h.fake.calls.filter((call) => call.method === 'interactions.press').map((call) => call.args)).toEqual([{ ref: '@e3' }]);
   });
 
-  it('refuses a node still covered when the budget runs out, naming the cover, and sends nothing', async () => {
+  it('drags a node at rest under the footer clear by the least that clears its tap point, then presses it at rest', async () => {
+    autoAdvanceTimers();
+    const h = harness({ transition: 0 });
+    await openAttempt(h);
+    screens(h, { nodes: sticky(782) }, { nodes: sticky(782) }, { nodes: sticky(745) }, { nodes: sticky(745) });
+    const [accept] = await h.engine.locate!(testIdQuery('accept-terms'), step());
+    await h.engine.perform!(accept!.ref, { kind: 'tap' }, step());
+    // Continue covers from 792 (its frame less 8 pt) to the screen's bottom: the
+    // finger goes down halfway between the scroll view's top (116) and it, and
+    // moves the tap point (805) to 760, plus the 12 pt the drag loses to slop.
+    expect(h.fake.calls.filter((call) => call.method === 'interactions.pan').map((call) => call.args)).toEqual([
+      { x: 201, y: 454, dx: 0, dy: -57, durationMs: 456 },
+    ]);
+    const methods = h.fake.calls.map((call) => call.method).filter((method) => method === 'interactions.pan' || method === 'interactions.press');
+    expect(methods).toEqual(['interactions.pan', 'interactions.press']);
+  });
+
+  it('refuses a node the drags leave covered when the budget runs out, naming the cover, and presses nothing', async () => {
     autoAdvanceTimers();
     const h = harness({ transition: 0 });
     await openAttempt(h);
     screens(h, { nodes: sticky(782) });
     const [accept] = await h.engine.locate!(testIdQuery('accept-terms'), step());
-    await expect(h.engine.perform!(accept!.ref, { kind: 'tap' }, step(1_000))).rejects.toMatchObject({
+    await expect(h.engine.perform!(accept!.ref, { kind: 'tap' }, step(5_000))).rejects.toMatchObject({
       code: 'NOT_ACTIONABLE',
       retryable: false,
       message: expect.stringMatching(/covered at its tap point by other "Continue"/),
     });
+    expect(h.fake.calls.filter((call) => call.method === 'interactions.pan')).toHaveLength(3);
     expect(h.fake.calls.some((call) => call.method === 'interactions.press')).toBe(false);
   });
 
@@ -3284,6 +3303,7 @@ describe('a press on a covered node', () => {
       message: expect.stringMatching(/covered at its tap point by the keyboard/),
     });
     expect(h.fake.calls.some((call) => call.method === 'interactions.fill')).toBe(false);
+    expect(h.fake.calls.some((call) => call.method === 'interactions.pan')).toBe(false);
 
     screens(h, { nodes: nodes.map((node) => (node.identifier === 'notes' ? { ...node, focused: true } : node)), keyboard });
     const [focused] = await h.engine.locate!(testIdQuery('notes'), step());

@@ -55,6 +55,19 @@ const EDGE_HUG_SHARE = 0.25;
  */
 const CHROME_CLEARANCE = 8;
 
+/** What is drawn over one node's tap point. */
+export interface Cover {
+  /** The cover as an error message names it: `the keyboard`, `button "Next"`. */
+  readonly by: string;
+  /**
+   * For sticky chrome, the region of the screen it covers (every chrome node
+   * over the tap point together) and the frame of the scroll view it is
+   * over, which a scroll moves the node out from under; undefined for the
+   * keyboard, which no scroll moves.
+   */
+  readonly chrome?: { readonly region: Rect; readonly scroll: Rect } | undefined;
+}
+
 /** One node drawn over a scroll view, and the region of the screen it covers. */
 interface Chrome {
   readonly position: number;
@@ -77,8 +90,8 @@ function isScrollKind(kind: string): boolean {
 }
 
 /**
- * The node each covered node's tap point lies under, by position, described
- * for an error message. A tap lands on the centre of a node's frame, and two
+ * The node each covered node's tap point lies under, by position: named for
+ * an error message and, for chrome, where it lies over its scroll view. A tap lands on the centre of a node's frame, and two
  * things cover it there:
  *
  * - Chrome over a scroll view: a node outside the scroll view the content
@@ -101,9 +114,9 @@ function isScrollKind(kind: string): boolean {
  * chrome: a view with no accessibility element and nothing listed in it,
  * such as a decorative banner, covers nothing here.
  */
-export function coveredNodes(input: OcclusionInput): ReadonlyMap<number, string> {
+export function coveredNodes(input: OcclusionInput): ReadonlyMap<number, Cover> {
   const { raw, parents, kinds, kept, keyboard } = input;
-  const covered = new Map<number, string>();
+  const covered = new Map<number, Cover>();
   // Parents precede their children, so one pass top-down finds every node's
   // nearest scroll view and whether it belongs to the keyboard.
   const scrollOf: (number | undefined)[] = [];
@@ -130,19 +143,27 @@ export function coveredNodes(input: OcclusionInput): ReadonlyMap<number, string>
     if (rect === undefined) continue;
     const point = centre(rect);
     if (keyboard !== undefined && !inKeyboard[position] && !encloses(rect, keyboard) && contains(keyboard, point)) {
-      covered.set(position, 'the keyboard');
+      covered.set(position, { by: 'the keyboard' });
       continue;
     }
     const scroll = scrollOf[position];
     if (scroll === undefined) continue;
     // Name the chrome nearest the point among those whose region holds it: the
-    // one it is on, else the one whose padding it is in.
+    // one it is on, else the one whose padding it is in. A scroll has to clear
+    // all of them, so the region is their union.
     let cover: Chrome | undefined;
+    let region: Rect | undefined;
     for (const candidate of chromeOver(scroll)) {
       if (!contains(candidate.region, point)) continue;
+      region = region === undefined ? candidate.region : union(region, candidate.region);
       if (cover === undefined || distance(candidate.frame, point) < distance(cover.frame, point)) cover = candidate;
     }
-    if (cover !== undefined) covered.set(position, describeCover(raw[cover.position]!, kinds[cover.position] ?? ''));
+    if (cover !== undefined && region !== undefined) {
+      covered.set(position, {
+        by: describeCover(raw[cover.position]!, kinds[cover.position] ?? ''),
+        chrome: { region, scroll: raw[scroll]!.rect! },
+      });
+    }
   }
   return covered;
 }
@@ -226,6 +247,13 @@ function contains(rect: Rect, point: Point): boolean {
 /** Whether `outer` holds all of `inner`: a window or a screen-wide container is never under the keyboard it holds. */
 function encloses(outer: Rect, inner: Rect): boolean {
   return outer.x <= inner.x && outer.y <= inner.y && outer.x + outer.width >= inner.x + inner.width && outer.y + outer.height >= inner.y + inner.height;
+}
+
+/** The smallest rect holding both. */
+function union(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
 }
 
 function intersects(a: Rect, b: Rect): boolean {
