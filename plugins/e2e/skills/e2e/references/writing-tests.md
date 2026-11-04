@@ -217,6 +217,10 @@ array is `INVALID_ARGUMENT`), `focus()`, `hover()`, `setInputFiles(paths)`
 `swipe({ direction, momentum? })`. Web only, `UNSUPPORTED_CAPABILITY` on a
 device: `secondaryTap`, `selectOption`, `setInputFiles`, `scrollIntoView`,
 and `modifiers`.
+On a device a press never lands on what covers the node's centre: it drags a
+node at rest under sticky chrome clear of it, waits on the soft keyboard, and
+fails `ACTION_FAILED` naming the cover when the timeout runs out. A covered
+node still reads as visible.
 
 `fill` sets the value with no key events; when the app reacts to keystrokes
 (autocomplete, a masked input) use `pressSequentially`, which focuses the
