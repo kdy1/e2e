@@ -3275,6 +3275,28 @@ describe('a press on a covered node', () => {
     expect(methods).toEqual(['interactions.pan', 'interactions.press']);
   });
 
+  it('drags a node at rest under a navigation bar down, starting the drag below the bar', async () => {
+    autoAdvanceTimers();
+    const h = harness({ transition: 0 });
+    await openAttempt(h);
+    const inbox = (cellY: number): RawNode[] => [
+      { ref: '@e1', index: 0, depth: 0, type: 'Application', label: 'e2e Benchmark', rect: { x: 0, y: 0, width: 402, height: 874 } },
+      { ref: '@e2', index: 1, parentIndex: 0, depth: 1, type: 'NavigationBar', identifier: 'Inbox', rect: { x: 0, y: 62, width: 402, height: 96 } },
+      { ref: '@e3', index: 2, parentIndex: 0, depth: 1, type: 'ScrollView', rect: { x: 0, y: 0, width: 402, height: 874 } },
+      { ref: '@e4', index: 3, parentIndex: 2, depth: 2, type: 'Cell', label: 'Under the bar', identifier: 'under', rect: { x: 0, y: cellY, width: 402, height: 44 } },
+    ];
+    screens(h, { nodes: inbox(90) }, { nodes: inbox(90) }, { nodes: inbox(188) }, { nodes: inbox(188) });
+    const [under] = await h.engine.locate!(testIdQuery('under'), step());
+    await h.engine.perform!(under!.ref, { kind: 'tap' }, step());
+    // The bar covers from the screen's top to 166 (its frame plus 8 pt): the
+    // finger goes down halfway between it and the bottom, and moves the tap
+    // point (112) to 198, plus slop.
+    expect(h.fake.calls.filter((call) => call.method === 'interactions.pan').map((call) => call.args)).toEqual([
+      { x: 201, y: 520, dx: 0, dy: 98, durationMs: 784 },
+    ]);
+    expect(h.fake.calls.filter((call) => call.method === 'interactions.press').map((call) => call.args)).toEqual([{ ref: '@e4' }]);
+  });
+
   it('refuses a node the drags leave covered when the budget runs out, naming the cover, and presses nothing', async () => {
     autoAdvanceTimers();
     const h = harness({ transition: 0 });
