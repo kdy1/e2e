@@ -209,7 +209,15 @@ interface NodeBinding {
   readonly keyboardVisible: boolean;
   /** Whether `fill` and `clear` may type into the node, judged with the children `node` leaves out. */
   readonly takesText: boolean;
+  /** What is drawn over the node's tap point in the capture it came from; undefined when nothing is. */
+  readonly coveredBy: string | undefined;
 }
+
+/** The actions that press the node they act on, so a press on a covered one would land on its cover. */
+const PRESSING_ACTIONS: ReadonlySet<LocatorAction['kind']> = new Set(['tap', 'focus', 'doubleTap', 'longPress', 'fill', 'clear', 'check', 'uncheck']);
+
+/** How long a press on a covered node waits between captures for its tap point to clear. */
+const COVER_POLL_MS = 100;
 
 
 /**
@@ -1035,6 +1043,7 @@ export class AgentDeviceSurface {
         },
         viewport: raw.viewport,
         refsGeneration: raw.refsGeneration,
+        keyboard: raw.keyboard?.kind === 'visible' || raw.keyboard?.kind === 'derived' ? raw.keyboard.frame : undefined,
       }),
       keyboardVisible: keyboardShowing(raw),
     };
@@ -1189,6 +1198,7 @@ export class AgentDeviceSurface {
       keyboardVisible: snapshot.keyboardVisible,
       takesText: mayTakeText(entry.node),
       refsGeneration: snapshot.refsGeneration,
+      coveredBy: entry.coveredBy,
     };
   }
 
@@ -1286,6 +1296,32 @@ export class AgentDeviceSurface {
   }
 
   /**
+   * The control once nothing is drawn over its tap point, the way Playwright
+   * waits for a node to receive events: a press on a covered node lands on
+   * whatever covers it (a sticky footer, the keyboard), so it waits, finding
+   * the node again in a fresh capture every `COVER_POLL_MS`, while the budget
+   * still fits another capture and the press. One still covered then is
+   * NOT_ACTIONABLE, naming the cover, and nothing is sent.
+   */
+  private async uncovered(entry: NodeBinding, operation: OperationContext, budget: InputBudget, input: boolean): Promise<NodeBinding> {
+    let target = entry;
+    let captureMs = 0;
+    while (target.coveredBy !== undefined) {
+      if (budget.remainingMs() <= COVER_POLL_MS + captureMs) {
+        throw notActionable(`node ${target.id} is covered at its tap point by ${target.coveredBy}; scroll it clear or dismiss what covers it`);
+      }
+      await sleep(COVER_POLL_MS, operation.signal);
+      if (operation.signal.aborted) {
+        throw new EngineError('CANCELLED', 'covered node wait cancelled', { retryable: false });
+      }
+      const startedMs = Date.now();
+      target = await this.relocated(target, operation, budget, input);
+      captureMs = Date.now() - startedMs;
+    }
+    return target;
+  }
+
+  /**
    * Records an action the device received: the screen as it was projected
    * before it, and when it returned. The transition budget counts from the
    * return, since the input lands late in the command's own round trip.
@@ -1339,6 +1375,9 @@ export class AgentDeviceSurface {
       } else if (deterministic) {
         target = await this.settled(entry, operation, input);
       }
+      // A key reaches a focused field through the keyboard, so only an unfocused one is pressed first.
+      const presses = PRESSING_ACTIONS.has(action.kind) || (action.kind === 'press' && target.node.role === 'textbox' && target.node.states?.focused !== true);
+      if (presses) target = await this.uncovered(target, operation, input, filling);
       switch (action.kind) {
         case 'tap':
           return input.send(() => client.interactions.press({ ...this.actionTarget(target, true), ...settle }));

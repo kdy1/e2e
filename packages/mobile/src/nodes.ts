@@ -9,6 +9,8 @@
 
 import type { SnapshotNode } from 'agent-device';
 import type { SemanticNode, ViewportSize } from 'e2e/engine';
+import { coveredNodes } from './occlusion.ts';
+import type { Rect } from './support.ts';
 
 /**
  * One agent-device snapshot node as this engine reads it: agent-device's own
@@ -27,6 +29,13 @@ export interface ProjectedNode {
   readonly raw: RawNode;
   readonly node: SemanticNode;
   readonly parent: ProjectedNode | undefined;
+  /**
+   * What is drawn over the node's tap point (sticky chrome over its scroll
+   * view, or the soft keyboard), for an error message; undefined when nothing
+   * is. It leaves the node's visibility alone: a press waits for it to
+   * clear, see `coveredNodes` in occlusion.ts.
+   */
+  readonly coveredBy: string | undefined;
 }
 
 export interface ProjectedSnapshot {
@@ -447,12 +456,20 @@ function isSystemBar(node: RawNode, screen: ViewportSize | undefined, displayOnl
  * Projects one snapshot. `mintId` is called once per node in document order,
  * so the surface's id space stays unique across observations. `viewport` is
  * the one agent-device published with the snapshot; a producer that measured
- * none leaves it to `viewportOf`. Android's system bars are left out with
- * their children, see `isSystemBar`.
+ * none leaves it to `viewportOf`. `keyboard` is the soft keyboard's frame the
+ * capture measured. Android's system bars are left out with their children,
+ * see `isSystemBar`. A node whose tap point something else covers keeps what
+ * covers it in `coveredBy` and its visibility as the platform reported it,
+ * see `coveredNodes`.
  */
 export function projectSnapshot(
   raw: readonly RawNode[],
-  options: { readonly mintId: () => string; readonly viewport?: ViewportSize | undefined; readonly refsGeneration?: number | undefined },
+  options: {
+    readonly mintId: () => string;
+    readonly viewport?: ViewportSize | undefined;
+    readonly refsGeneration?: number | undefined;
+    readonly keyboard?: Rect | undefined;
+  },
 ): ProjectedSnapshot {
   const viewport = options.viewport ?? viewportOf(raw);
   const parents = parentPositions(raw);
@@ -466,6 +483,25 @@ export function projectSnapshot(
     const siblings = children.get(parent);
     if (siblings === undefined) children.set(parent, [position]);
     else siblings.push(position);
+  });
+
+  /** Whether every node from `position` down is a class that only shows (`STATUS_ICON_KINDS`). */
+  const displayOnly = (position: number): boolean => {
+    const node = raw[position] as RawNode;
+    if (node.editable === true || !STATUS_ICON_KINDS.has(normalizeKind(node.type ?? ''))) return false;
+    return (children.get(position) ?? []).every(displayOnly);
+  };
+  const keptRoots = new Set(roots.filter((position) => !isSystemBar(raw[position] as RawNode, viewport, () => displayOnly(position))));
+  const rootOf: number[] = [];
+  parents.forEach((parent, position) => {
+    rootOf[position] = parent === undefined ? position : (rootOf[parent] as number);
+  });
+  const covered = coveredNodes({
+    raw,
+    parents,
+    kinds: raw.map(kindOf),
+    kept: (position) => keptRoots.has(rootOf[position] as number),
+    keyboard: options.keyboard,
   });
 
   const index: ProjectedNode[] = [];
@@ -508,6 +544,7 @@ export function projectSnapshot(
       kind,
       raw: source,
       parent,
+      coveredBy: covered.get(position),
       get node(): SemanticNode {
         return projected.node as SemanticNode;
       },
@@ -546,15 +583,7 @@ export function projectSnapshot(
     projected.node = node;
     return node;
   };
-  /** Whether every node from `position` down is a class that only shows (`STATUS_ICON_KINDS`). */
-  const displayOnly = (position: number): boolean => {
-    const node = raw[position] as RawNode;
-    if (node.editable === true || !STATUS_ICON_KINDS.has(normalizeKind(node.type ?? ''))) return false;
-    return (children.get(position) ?? []).every(displayOnly);
-  };
-  const rootNodes = roots
-    .filter((position) => !isSystemBar(raw[position] as RawNode, viewport, () => displayOnly(position)))
-    .map((position) => build(position, undefined));
+  const rootNodes = roots.filter((position) => keptRoots.has(position)).map((position) => build(position, undefined));
   return { roots: rootNodes, index, viewport, refsGeneration: options.refsGeneration };
 }
 
